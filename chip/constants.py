@@ -1,0 +1,3 @@
+TEMPERATURE = 0.7
+K = 40
+P = 0.9
