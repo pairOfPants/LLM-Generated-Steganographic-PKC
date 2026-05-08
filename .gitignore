@@ -1,2 +1,4 @@
 keys.py
 ./venv/
+__pycache__/
+chip/__pycache__/
