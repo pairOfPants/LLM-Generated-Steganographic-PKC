@@ -15,6 +15,11 @@ def main():
 
     client = OllamaClient(base_url=OLLAMA_HOST, model="gemma4:31b")
 
+    client = OpenAI(
+    base_url=f"{OLLAMA_HOST}/v1", 
+    api_key="ollama"  # The library requires a string here, but Ollama ignores it
+    )
+
     print(f"Connecting to Ollama at {client.base_url} ...")
     try:
         models = client.list_models()
