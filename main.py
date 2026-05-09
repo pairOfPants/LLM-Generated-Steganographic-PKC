@@ -6,7 +6,7 @@ Entry point: verifies connectivity to Ollama and prints a hello-world response.
 import os
 
 from chip.ollama_client import OllamaClient
-
+from openai import OpenAI
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 
 
@@ -42,17 +42,18 @@ def main():
 
     print(f"Connecting to Ollama at {client.base_url} ...")
     try:
-        models = client.list_models()
+        models = client.models.list()
         print(f"Available models: {models}\n")
     except ConnectionError as e:
         print(f"[ERROR] {e}")
         return
 
     print("Sending hello-world prompt ...\n")
-    response = client.generate(
-        "Say hello and introduce yourself in one short sentence."
+    response = client.chat.completions.create(
+        model="gemma4:31b",
+        messages=[{"role": "user", "content": "Say hello and introduce yourself in one short sentence."}]
     )
-    print(f"Ollama says:\n  {response}\n")
+    print(f"Ollama says:\n  {response.choices[0].message.content}\n")
     print("Setup complete.")
 
 
