@@ -66,31 +66,32 @@ class LLMAuthenticatedEncryption:
     def encrypt_to_story(
         self,
         password: str,
-        plaintext: bytes,
+        plaintext: bytes,   
         topic: str,
     ) -> str:
         """
         Implements Algorithm 2.
+        Expects plaintext, topic passed as arguments, whereas paper algorithm collects it inside alg
         """
     
-        dk1, dk2 = self._derive_keys(password)
-        nonce = token_bytes(constants.NONCE_SIZE)
-        ciphertext_with_tag = self._aead_encrypt(
+        dk1, dk2 = self._derive_keys(password) #Line 1 of algorithm 2
+        nonce = token_bytes(constants.NONCE_SIZE) #Prerequisite for line 3 of algorithm 2
+        ciphertext_with_tag = self._aead_encrypt(   #Line 3
             key=dk1,
             nonce=nonce,
             plaintext=plaintext,
             associated_data=constants.ASSOCIATED_DATA,
         )
-        enc_hex = ciphertext_with_tag.hex().upper()
+        enc_hex = ciphertext_with_tag.hex().upper() #Line 4/5 - treat ciphertext || tag as hex string
 
-        mapped_chars = compute_encoding(enc_hex)
+        mapped_chars = compute_encoding(enc_hex) #Line 6: C <- h5(enc)
 
-        positions = self._generate_positions(
+        positions = self._generate_positions( #Lines 7,8,9 of algorithm 2 handled in this function
             seed=dk2,
             count=len(mapped_chars),
         )
 
-        story = self.embedder.embed(
+        story = self.embedder.embed( #Line 11, create story given all other params
             topic = topic,
             initial_story = "",
             characters = mapped_chars,
@@ -100,7 +101,7 @@ class LLMAuthenticatedEncryption:
             security_level = constants.SECURITY_LEVEL,
         )
 
-        return story
+        return story #Step 12, return story (and eventually send to Bob)
     
 
     def _derive_keys(self, password: str) -> tuple[bytes, bytes]:
@@ -199,7 +200,115 @@ class LLMAuthenticatedEncryption:
         word = (hi << 8) | lo
         return (word >> (16 - chunk_size - bit_shift)) & ((1 << chunk_size) - 1)
 
+class LLMAuthenticatedDecryption:
+    def __init__(
+        self,
+        password: str,
+        story: str,
+    ) -> None:
+        self.password = password
+        self.story = story
 
+    def decrypt_from_story(self) -> bytes | None:
+        """
+        Implements Algorithm 3: LLM Authenticated Decryption and Verification.
+        Returns plaintext bytes, or None if authentication fails.
+        """
+        # Line 1: derive the same two keys Alice used
+        dk1, dk2 = self._derive_keys(self.password)
+
+        # Lines 2-8: re-derive positions from dk2 and extract Story[pos] for each
+        enc_chars = self._extract_chars(dk2)
+
+        # Lines 9-12: invert h5 to recover the hex string
+        # Build inverse lookup: H5 character → original hex character
+        inverse_h5 = {}
+        for hex_char in "0123456789ABCDEF":
+            h5_char = compute_encoding(hex_char)[0]
+            inverse_h5[h5_char] = hex_char
+
+        try:
+            hex_str = ''.join(inverse_h5[c] for c in enc_chars)
+        except KeyError:
+            return None  # Story contains an unexpected character
+
+        # The encrypted blob produced by _aead_encrypt is: nonce (12 B) || ciphertext || tag (16 B)
+        # In hex: 24 chars nonce + 2n chars ciphertext + 32 chars tag
+        if len(hex_str) < 24 + 32:
+            return None  # Too short to be a valid ciphertext
+
+        nonce = bytes.fromhex(hex_str[:24])
+        # AESGCM.decrypt expects ciphertext || tag as a single buffer
+        ciphertext_with_tag = bytes.fromhex(hex_str[24:])
+
+        # Line 13: AEAD_dec(dk1, nonce, AD, ciphertext || tag)
+        return self._aead_decrypt(dk1, nonce, ciphertext_with_tag, constants.ASSOCIATED_DATA)
+
+    def _derive_keys(self, password: str) -> tuple[bytes, bytes]:
+        """PBKDF2(password, Salt, count, 64) → (dk1, dk2)."""
+        derived = pbkdf2_hmac(
+            hash_name="sha256",
+            password=password.encode(),
+            salt=constants.SALT,
+            iterations=constants.PBKDF2_iterations,
+            dklen=64,
+        )
+        return derived[:32], derived[32:]
+
+    def _extract_chars(self, dk2: bytes) -> List[str]:
+        """
+        Algorithm 3 lines 3-8.
+        Re-derives the same position sequence Alice used and reads Story[pos]
+        at each position while pos < len(Story).
+        """
+        story = self.story
+        story_len = len(story)
+        chunk_size = constants.CHUNK_SIZE
+
+        # Upper bound on number of positions: story_len // OFFSET_DISTANCE
+        max_positions = story_len // constants.OFFSET_DISTANCE + 1
+        needed_bytes = math.ceil(max_positions * chunk_size / 8) + 1
+        xof_output = shake_128(dk2).digest(needed_bytes)
+
+        chars: List[str] = []
+        bit_pos = 0
+
+        # Line 4: first position = d_o + SHAKE128(chunk_size)
+        random_value = self._next_shake_chunk(xof_output, bit_pos, chunk_size)
+        bit_pos += chunk_size
+        pos = constants.OFFSET_DISTANCE + random_value
+
+        # Lines 5-8: while pos < len(Story), collect and advance
+        while pos < story_len:
+            chars.append(story[pos])
+            random_value = self._next_shake_chunk(xof_output, bit_pos, chunk_size)
+            bit_pos += chunk_size
+            pos += constants.OFFSET_DISTANCE + random_value
+
+        return chars
+
+    def _next_shake_chunk(self, buf: bytes, bit_pos: int, chunk_size: int) -> int:
+        """Extract chunk_size bits from buf starting at bit offset bit_pos."""
+        byte_idx = bit_pos // 8
+        bit_shift = bit_pos % 8
+        hi = buf[byte_idx]
+        lo = buf[byte_idx + 1] if byte_idx + 1 < len(buf) else 0
+        word = (hi << 8) | lo
+        return (word >> (16 - chunk_size - bit_shift)) & ((1 << chunk_size) - 1)
+
+    def _aead_decrypt(
+        self,
+        key: bytes,
+        nonce: bytes,
+        ciphertext_with_tag: bytes,
+        aad: bytes,
+    ) -> bytes | None:
+        """AES-256-GCM authenticated decryption. Returns None on auth failure."""
+        aesgcm = AESGCM(key)
+        try:
+            return aesgcm.decrypt(nonce, ciphertext_with_tag, aad)
+        except Exception:
+            return None
 '''
 compute_encoding(encoding):
 computes the mapping of H_5 to the encoded input

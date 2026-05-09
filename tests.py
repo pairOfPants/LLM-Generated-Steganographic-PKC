@@ -3,7 +3,7 @@ Algorithm 2 unit tests.
 Run with: python tests.py
 """
 
-from embedder import LLMAuthenticatedEncryption, compute_encoding
+from embedder import LLMAuthenticatedEncryption, LLMAuthenticatedDecryption, compute_encoding
 from hashlib import shake_128
 import chip.constants as constants
 
@@ -206,12 +206,63 @@ def test_encrypt_to_story_integration():
     _pass("encrypt_to_story: integration test passed — embedder received correct arguments")
 
 
+def test_encrypt_decrypt_roundtrip():
+    """Full Algorithm 2 → Algorithm 3 round-trip with a fixed plaintext."""
+    PASSWORD = "test-password"
+    PLAINTEXT = b"Hello world!"
+
+    class PositionEmbedder:
+        """
+        Minimal embedder that places each character at its exact required
+        position in the story, padding everything else with 'X'.
+        The story ends immediately after the last character position so that
+        the decryption loop stops at exactly the right point.
+        """
+        def embed(
+            self, topic, initial_story, characters, positions,
+            temperature, top_k, security_level,
+        ) -> str:
+            story = ['X'] * (positions[-1] + 1)
+            for char, pos in zip(characters, positions):
+                story[pos] = char
+            return ''.join(story)
+
+    print(f"  [LOG] plaintext:       {PLAINTEXT!r}")
+
+    # --- Encryption ---
+    enc = LLMAuthenticatedEncryption(PositionEmbedder())
+    story = enc.encrypt_to_story(
+        password=PASSWORD,
+        plaintext=PLAINTEXT,
+        topic="Test",
+    )
+    assert isinstance(story, str) and len(story) > 0, "story must be non-empty"
+    print(f"  [LOG] encrypted story: {story!r}")
+    _pass("roundtrip: encryption produced a non-empty story")
+
+    # --- Decryption with correct password ---
+    dec = LLMAuthenticatedDecryption(password=PASSWORD, story=story)
+    recovered = dec.decrypt_from_story()
+    assert recovered is not None, "decryption returned None (authentication failure)"
+    assert recovered == PLAINTEXT, f"decrypted {recovered!r} != expected {PLAINTEXT!r}"
+    print(f"  [LOG] decrypted:       {recovered!r}")
+    _pass("roundtrip: correct password recovers original plaintext")
+
+    # --- Wrong password must be rejected ---
+    dec_bad = LLMAuthenticatedDecryption(password="wrong-password", story=story)
+    bad_result = dec_bad.decrypt_from_story()
+    print(f"  [LOG] wrong password result: {bad_result!r}")
+    assert bad_result is None, \
+        "wrong password should cause auth failure (None), but it succeeded"
+    _pass("roundtrip: wrong password correctly rejected")
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
 def run_tests():
-    print("\n=== Running Algorithm 2 Unit Tests ===\n")
+    print("\n=== Running Algorithm 2 & 3 Unit Tests ===\n")
     tests = [
         test_derive_keys,
         test_aead_encrypt_structure,
@@ -223,6 +274,7 @@ def run_tests():
         test_compute_encoding_known_input,
         test_compute_encoding_output_length,
         test_encrypt_to_story_integration,
+        test_encrypt_decrypt_roundtrip,
     ]
     passed = 0
     failed = 0
