@@ -31,10 +31,30 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 #     print("Setup complete.")
 import embedder
 def main():
-    plaintext = "Hey"
-    encoding = embedder.compute_encoding(plaintext)
-    print(f"Plaintext: {plaintext}")
-    print(f"Encoded: {encoding}")
+    print("=== CHIP - Cryptographic Hybrid Intelligence Platform ===\n")
+
+    client = OllamaClient(base_url=OLLAMA_HOST, model="gemma4:31b")
+
+    client = OpenAI(
+    base_url=f"{OLLAMA_HOST}/v1", 
+    api_key="ollama"  # The library requires a string here, but Ollama ignores it
+    )
+
+    print(f"Connecting to Ollama at {client.base_url} ...")
+    try:
+        models = client.list_models()
+        print(f"Available models: {models}\n")
+    except ConnectionError as e:
+        print(f"[ERROR] {e}")
+        return
+
+    print("Sending hello-world prompt ...\n")
+    response = client.generate(
+        "Say hello and introduce yourself in one short sentence."
+    )
+    print(f"Ollama says:\n  {response}\n")
+    print("Setup complete.")
+
 
 if __name__ == "__main__":
     main()
