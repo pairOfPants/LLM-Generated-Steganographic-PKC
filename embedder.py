@@ -114,7 +114,7 @@ class LLMAuthenticatedEncryption:
         """
 
         derived = pbkdf2_hmac(
-            hash_name="sha256",
+            hash_name="shake128",
             password=password.encode(),
             salt=constants.SALT,
             iterations=constants.PBKDF2_iterations,
@@ -247,7 +247,7 @@ class LLMAuthenticatedDecryption:
     def _derive_keys(self, password: str) -> tuple[bytes, bytes]:
         """PBKDF2(password, Salt, count, 64) → (dk1, dk2)."""
         derived = pbkdf2_hmac(
-            hash_name="sha256",
+            hash_name="shake128",
             password=password.encode(),
             salt=constants.SALT,
             iterations=constants.PBKDF2_iterations,
