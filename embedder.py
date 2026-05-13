@@ -58,7 +58,7 @@ def embedderLLM (LLM, TOPIC, Story0, T0, k0, C, b, l, sec):
         Y_valid = token_pos_check(Y_topk, Story, C[i], b[i])
 
         # Check if Y_valid populated
-        if len(Y_valid > 0):
+        if (len(Y_valid) > 0):
 
             # Append a RANDOM word from Y_valid list
             chosenOne = secrets.choice(Y_valid)
@@ -96,17 +96,17 @@ def embedderLLM (LLM, TOPIC, Story0, T0, k0, C, b, l, sec):
                         Story = Story + next_token
                         Unsuccessful = False
                         break
-                
-                # last call, increment Slow_Down
-                Slow_Down += 1
-                if (Slow_Down < top_f):
-                    Unsuccessful = False
-                    T = T + tSloDown
-                    break
-
-                # reset Slow_Down
-                else:
-                    Slow_Down = 0
+                    else:
+                        Slow_Down += 1
+                        # last call, increment Slow_Down
+                        if (Slow_Down < top_f):
+                            Unsuccessful = False
+                            T = T + tSloDown
+                            break
+                        
+                        # reset Slow_Down
+                        else:
+                            Slow_Down = 0
 
             # After itterations & still unsuccessful, retry w/ +k
             if Unsuccessful:
