@@ -15,14 +15,6 @@ TOP_F_TABLE = {
     (128, 1): 136,(128, 2): 194,(128, 3): 232,(128, 4): 477
 }
 
-# PRF (SHAKE128)
-# Create SHAKE128 hash object 
-def PRF():
-    maraca = hashlib.shake_128()
-
-# Update hash object 
-
-
 # Embedder LLM function
 # -- Parameters -- 
 # LLM: name of specific LLM model
@@ -32,13 +24,166 @@ def PRF():
 # k0: inital value for the top k0 tokens w/ top k0 Probs
 # C: sequence = [C0, C1,..., C_(n-1)] of chars from some sets S1,...,S4
 # b: sequence of int = [b0,b1,...,b_(n-1)] {same number n as C}
+def embedderLLM (LLM, TOPIC, Story0, T0, k0, C, b, l, sec):
+
+    # intialize all variables 
+    i = 0                     # inital step 
+    n = len(C)                # length of desired embedded text  
+    Story = Story0            # Prev story is curr story
+    prev_pos = len(Story)     # Index of last spot in story 
+    Close = False             # emergency shut off for token placement
+    T = T0                    # Update Temp 
+    k = k0                    # Update k 
+    Slow_Down = 0             # reset Slow_Down count for new itteration 
+    Unsuccessful = False
+    
+    # pick max num of repetitive attempts to find an appropriate token 
+    # before needing to increase the k param
+    top_f = TOP_F_TABLE[sec, l]
+
+    # Calculate Slow_Down Step 
+    tSloDown = 0.2 / (21 * top_f)
+
+    # -- MAIN LOOP --
+    while i < n:
+
+        # Generate top list of tokens 
+        Y_topk = top_k_token_retriever(LLM, TOPIC, Story, T, k)
+
+        # Check tokens for valid b_i positions
+        Y_valid = token_pos_check(Y_topk, Story, C[i], b[i])
+
+        # Check if Y_valid populated
+        if len(Y_valid > 0):
+
+            # Append a RANDOM word from Y_valid list
+            chosenOne = secrets.choice(Y_valid)
+            Story = Story + chosenOne
+            prev_pos = len(Story)
+
+            # Reset values
+            Close = False             
+            T = T0                     
+            k = k0                    
+            Slow_Down = 0   
+
+            # increment
+            i += 1
+        
+        # If no valid tokens found
+        else:
+
+            # shuffle the list of top-K & flip unsuccessful
+            Y_shuffle = Y_topk[:]
+            random.shuffle(Y_shuffle)
+            Unsuccessful = True
+
+            # itterate through each shuffled token to see if it fits special critrion
+            for next_token in Y_shuffle:
+                if (len(Story + next_token) < b[i] - 6):
+                    Story = Story + next_token
+                    Unsuccessful = False
+                    break
+
+                # append word if its not close & < b[i]
+                elif (len(Story + next_token) < b[i]):
+                    if not Close:
+                        Close = True
+                        Story = Story + next_token
+                        Unsuccessful = False
+                        break
+                
+                # last call, increment Slow_Down
+                Slow_Down += 1
+                if (Slow_Down < top_f):
+                    Unsuccessful = False
+                    T = T + tSloDown
+                    break
+
+                # reset Slow_Down
+                else:
+                    Slow_Down = 0
+
+            # After itterations & still unsuccessful, retry w/ +k
+            if Unsuccessful:
+                Story = Story[:prev_pos]
+                T = T + tSloDown
+                k += 1
+                Slow_Down = 0
+                Close = False
+
+    return Story
+            
+
+# Function to retrieve Top k Tokens
+# -- Parameters --
+# LLM: model type desired
+# Topic: topic of story
+# Story: Previous story to build off of 
+# T: Desired temp
+# k: top k token count 
+def top_k_token_retriever(LLM, Topic, Story, T, k):
+
+    # Attempt to generate token with except catch
+    try:
+        # Call Local Model and retrieve top k candidates 
+        prompt = f"Topic: {Topic} \n\nContinue this story:\n{Story}"
+
+        # Initiate chat completion API call
+        reponse = client.chat.completions.create(
+
+            model=LLM,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1,
+            temperature=T,
+            logprobs = True,
+            top_logprobs = k
+        )
+
+        # Extract & log tokens (navigate JSON struct)
+        Y_topk = []
+        
+        for prob in response.choices[0].logprobs.content[0].top_lobprobs:
+            Y_topk.append(prob.token)
+
+        return Y_topk
+
+    # Error Handling
+    except Exception as e:
+        print(f"Error communcating with Ollama: {e}") 
+        return []
+
+
+# Function to check story if Char token fits the placement
+# -- Parameters --
+# Y_topk: list of generated top k tokens
+# Story: current generated story
+# Ci: current desired character
+# bi: current desired index
+def token_pos_check(Y_topk, Story, Ci, bi):
+
+    # create placeholder list
+    Y_good = []
+    
+    # Loop through and check each Ci
+    for token in Y_topk:
+        Story_test = Story + token
+
+        # Check to see if added token reaches desired length
+        if len(Story_test) > bi:
+
+            # Check to see if token matches desired 
+            if Story_test[bi].upper() == Ci.upper():
+                Y_good.append(token)
+
+    return Y_good 
+
 import chip.constants as constants
 from secrets import token_bytes
 from dataclasses import dataclass
 from hashlib import pbkdf2_hmac, shake_128
 from typing import List, Protocol
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
 
 class EmbedderLLM(Protocol):
     def embed(
