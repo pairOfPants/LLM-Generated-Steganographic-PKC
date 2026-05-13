@@ -4,6 +4,10 @@ from __future__ import annotations
 import hashlib
 import math
 from chip.constants import H5
+import os 
+import secrets
+import random
+from openai import OpenAI
 
 # Top Table 
 TOP_F_TABLE = {
