@@ -134,7 +134,7 @@ def top_k_token_retriever(LLM, Topic, Story, T, k):
         prompt = f"Topic: {Topic} \n\nContinue this story:\n{Story}"
 
         # Initiate chat completion API call
-        reponse = client.chat.completions.create(
+        response = client.chat.completions.create(
 
             model=LLM,
             messages=[{"role": "user", "content": prompt}],
