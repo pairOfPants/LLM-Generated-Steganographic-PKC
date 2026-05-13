@@ -147,7 +147,7 @@ def top_k_token_retriever(LLM, Topic, Story, T, k):
         # Extract & log tokens (navigate JSON struct)
         Y_topk = []
         
-        for prob in response.choices[0].logprobs.content[0].top_lobprobs:
+        for prob in response.choices[0].logprobs.content[0].top_logprobs:
             Y_topk.append(prob.token)
 
         return Y_topk
