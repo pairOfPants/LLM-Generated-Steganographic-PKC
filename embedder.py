@@ -250,6 +250,10 @@ class LLMAuthenticatedEncryption:
             security_level = constants.SECURITY_LEVEL,
         )
 
+        # Call embedderLLM and generate the story
+        llmChoice = input("What LLM model would you like to use: ")
+        story = embedderLLM(llmChoice, topic, initial_story, temperature, top_k, characters, positions, 4, 64)
+
         return story #Step 12, return story (and eventually send to Bob)
     
 
