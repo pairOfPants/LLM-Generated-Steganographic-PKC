@@ -160,6 +160,50 @@ def test_generate_positions_deterministic():
     _pass("generate_positions: deterministic for same seed")
 
 
+def test_compute_encoding_no_negative_indices():
+    """
+    Regression test: compute_encoding must not produce negative H5 indices.
+
+    compute_encoding("4A2F") exposes a double-encoding bug:
+      The function calls .encode('utf-8').hex() on the input, treating '4'
+      (ASCII 0x34) as a raw byte instead of treating '4' as the hex digit 4.
+      This produces values below 0x41 after the subtraction step, giving
+      negative indices. Python silently wraps these (H5[-13] == H5[3]),
+      so no IndexError is raised — the wrong characters are produced silently.
+
+    The correct behaviour for hex input "4A2F":
+      '4' → index 4  → H5[4][1]  = 'O'
+      'A' → index 0  → H5[0][1]  = ' '
+      '2' → index 2  → H5[2][1]  = 'T'
+      'F' → index 5  → H5[5][1]  = 'N'
+    (i.e. each hex digit value maps directly to that H5 index)
+    """
+    from embedder import compute_encoding
+    from chip.constants import H5
+
+    test_input = "4A2F"
+
+    try:
+        result = compute_encoding(test_input)
+    except Exception as e:
+        _fail("compute_encoding_no_negative_indices",
+              f"raised unexpected exception: {e}")
+        return
+
+    # Expected: each hex digit (0-9, A-F) maps directly to H5[digit_value][1]
+    expected = [H5[4][1], H5[0][1], H5[2][1], H5[15][1]]  # '4'=4,'A'=10... wait, 'F'=15
+    # Hex digit values: '4'->4, 'A'->10, '2'->2, 'F'->15
+    expected = [H5[4][1], H5[10][1], H5[2][1], H5[15][1]]
+
+    assert result == expected, (
+        f"compute_encoding('4A2F') returned {result!r}, expected {expected!r}. "
+        "Digit characters like '4' (0x34) produce negative indices (0x34-0x41=-13) "
+        "which Python wraps silently — H5[-13]==H5[3], giving wrong output."
+    )
+
+    _pass("compute_encoding: digit characters map to correct H5 indices (no negative-index wrap)")
+
+
 def test_compute_encoding_known_input():
     """compute_encoding maps uppercase-only hex chars to H5 characters."""
     # Use only A-F (valid uppercase hex chars whose ASCII codes fall in A-Z range).
@@ -271,6 +315,7 @@ def run_tests():
         test_generate_positions_count_and_monotonic,
         test_generate_positions_gap_bounds,
         test_generate_positions_deterministic,
+        test_compute_encoding_no_negative_indices,
         test_compute_encoding_known_input,
         test_compute_encoding_output_length,
         test_encrypt_to_story_integration,

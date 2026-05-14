@@ -3,7 +3,7 @@
 from __future__ import annotations
 import hashlib
 import math
-from chip.constants import H5
+from chip.constants import H4
 import os 
 import secrets
 import random
@@ -73,6 +73,7 @@ def embedderLLM (LLM, TOPIC, Story0, T0, k0, C, b, l, sec):
 
             # increment
             i += 1
+            print(f"[{i}/{n}] char='{C[i-1]}' pos={b[i-1]} story_len={len(Story)}\n{Story}\n", flush=True)
         
         # If no valid tokens found
         else:
@@ -107,7 +108,7 @@ def embedderLLM (LLM, TOPIC, Story0, T0, k0, C, b, l, sec):
                         # reset Slow_Down
                         else:
                             Slow_Down = 0
-
+            
             # After itterations & still unsuccessful, retry w/ +k
             if Unsuccessful:
                 Story = Story[:prev_pos]
@@ -115,6 +116,9 @@ def embedderLLM (LLM, TOPIC, Story0, T0, k0, C, b, l, sec):
                 k += 1
                 Slow_Down = 0
                 Close = False
+                
+                if k > 20: # Or whatever Ollama's max logprobs is set to
+                    raise RuntimeError(f"Infinite loop detected at char {i}. Unable to find a fitting token.")
 
     return Story
             
@@ -141,7 +145,7 @@ def top_k_token_retriever(LLM, Topic, Story, T, k):
             max_tokens=1,
             temperature=T,
             logprobs = True,
-            top_logprobs = k
+            top_logprobs = min(k, 20)
         )
 
         # Extract & log tokens (navigate JSON struct)
@@ -266,13 +270,16 @@ class LLMAuthenticatedEncryption:
             dk2 = last 32 bytes
         """
 
-        derived = pbkdf2_hmac(
-            hash_name="shake128",
-            password=password.encode(),
-            salt=constants.SALT,
-            iterations=constants.PBKDF2_iterations,
-            dklen=64,
-        )
+        # derived = pbkdf2_hmac(
+        #     hash_name="shake128",
+        #     password=password.encode(),
+        #     salt=constants.SALT,
+        #     iterations=constants.PBKDF2_iterations,
+        #     dklen=64,
+        # )
+
+        derived = shake_128(password.encode() + constants.SALT).digest(64)
+
 
         dk1 = derived[:32]
         dk2 = derived[32:]
@@ -373,12 +380,9 @@ class LLMAuthenticatedDecryption:
         # Lines 2-8: re-derive positions from dk2 and extract Story[pos] for each
         enc_chars = self._extract_chars(dk2)
 
-        # Lines 9-12: invert h5 to recover the hex string
-        # Build inverse lookup: H5 character → original hex character
-        inverse_h5 = {}
-        for hex_char in "0123456789ABCDEF":
-            h5_char = compute_encoding(hex_char)[0]
-            inverse_h5[h5_char] = hex_char
+        # Lines 9-12: invert h4 to recover the hex string
+        # Build inverse lookup: H4 character → original hex character
+        inverse_h5 = {H4[i][1]: format(i, 'X') for i in range(16)}
 
         try:
             hex_str = ''.join(inverse_h5[c] for c in enc_chars)
@@ -399,13 +403,14 @@ class LLMAuthenticatedDecryption:
 
     def _derive_keys(self, password: str) -> tuple[bytes, bytes]:
         """PBKDF2(password, Salt, count, 64) → (dk1, dk2)."""
-        derived = pbkdf2_hmac(
-            hash_name="shake128",
-            password=password.encode(),
-            salt=constants.SALT,
-            iterations=constants.PBKDF2_iterations,
-            dklen=64,
-        )
+        # derived = pbkdf2_hmac(
+        #     hash_name="shake128",
+        #     password=password.encode(),
+        #     salt=constants.SALT,
+        #     iterations=constants.PBKDF2_iterations,
+        #     dklen=64,
+        # )
+        derived = shake_128(password.encode() + constants.SALT).digest(64)
         return derived[:32], derived[32:]
 
     def _extract_chars(self, dk2: bytes) -> List[str]:
@@ -469,17 +474,5 @@ inparams: encoding - the plaintext after being passed through the AEAD function
 outparams: h5_embedding - the list of characters from H_5 that correspond to the encoded input
 '''
 def compute_encoding(encoding):
-    #ensure all characters are uppercase letters
     encoding = encoding.upper()
-    #Convert each character to hex
-    hex_string = encoding.encode('utf-8').hex()
-    #Normalize each character by subtracting 0x41 (uppercase A)
-    normalized_pt = [int(hex_string[i:i+2], 16) - 0x41 for i in range(0, len(hex_string), 2)]
-    #map normalized characters to H5
-    h_mapped_chars = [H5[char][0] for char in normalized_pt]
-    
-    h5_embedding = [''] * len(h_mapped_chars)  # Initialize an empty list for the H5 embedding
-    for i in range(len(h_mapped_chars)):
-        h5_embedding[i] = H5[h_mapped_chars[i]][1]  # Get the character from H5 using the index
-
-    return h5_embedding
+    return [H4[int(ch, 16)][1] for ch in encoding]
