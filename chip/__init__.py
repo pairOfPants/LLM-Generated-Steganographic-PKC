@@ -1,5 +1,4 @@
 """
-CHIP - Cryptographic Hybrid Intelligence Platform
 A Python project interfacing with an Ollama AI backend.
 """
 
