@@ -1,12 +1,16 @@
+'''
+Embedder.py
+Authors: Raiyaan Tareen, Aidan Denham
+Core functionality of project, implements Algorithm 1, 2, and 3 from the paper.
+Please note that NO parts of this file were generated with the help of Artificial Intelligence
+'''
 # This is the core file for each function
-# -- Imports --
 from __future__ import annotations
-import hashlib
 import math
-from chip.constants import H4
-import os 
+import time
 import secrets
 import random
+from chip.constants import H4, MAX_TOP_K, MAX_CONCURRENT_TOKENS
 from openai import OpenAI
 
 # Top Table 
@@ -40,6 +44,7 @@ def embedderLLM (LLM, TOPIC, Story0, T0, k0, C, b, l, sec):
     k = k0                    # Update k 
     Slow_Down = 0             # reset Slow_Down count for new itteration 
     Unsuccessful = False
+    char_start_time = time.time()
     
     # pick max num of repetitive attempts to find an appropriate token 
     # before needing to increase the k param
@@ -73,7 +78,14 @@ def embedderLLM (LLM, TOPIC, Story0, T0, k0, C, b, l, sec):
 
             # increment
             i += 1
-            print(f"[{i}/{n}] char='{C[i-1]}' pos={b[i-1]} story_len={len(Story)}\n{Story}\n", flush=True)
+            now = time.time()
+            elapsed = now - char_start_time
+            char_start_time = now
+
+            # Inline placement verification: confirm Story[b[i-1]] == C[i-1]
+            actual_char = Story[b[i-1]] if b[i-1] < len(Story) else '<OOB>'
+            verify_status = "OK" if actual_char.upper() == C[i-1].upper() else f"MISMATCH (got '{actual_char}')"
+            print(f"[{i}/{n}] char='{C[i-1]}' pos={b[i-1]} story_len={len(Story)} elapsed={elapsed:.2f}s verify={verify_status}\n{Story}\n", flush=True)
         
         # If no valid tokens found
         else:
@@ -83,7 +95,7 @@ def embedderLLM (LLM, TOPIC, Story0, T0, k0, C, b, l, sec):
             random.shuffle(Y_shuffle)
             Unsuccessful = True
 
-            # itterate through each shuffled token to see if it fits special critrion
+            # iterate through each shuffled token to find one that fits the position criterion
             for next_token in Y_shuffle:
                 if (len(Story + next_token) < b[i] - 6):
                     Story = Story + next_token
@@ -109,7 +121,7 @@ def embedderLLM (LLM, TOPIC, Story0, T0, k0, C, b, l, sec):
                         else:
                             Slow_Down = 0
             
-            # After itterations & still unsuccessful, retry w/ +k
+            # After all iterations still unsuccessful — backtrack and retry with larger k
             if Unsuccessful:
                 Story = Story[:prev_pos]
                 T = T + tSloDown
@@ -117,7 +129,7 @@ def embedderLLM (LLM, TOPIC, Story0, T0, k0, C, b, l, sec):
                 Slow_Down = 0
                 Close = False
                 
-                if k > 20: # Or whatever Ollama's max logprobs is set to
+                if k > MAX_TOP_K: # Or whatever Ollama's max logprobs is set to
                     raise RuntimeError(f"Infinite loop detected at char {i}. Unable to find a fitting token.")
 
     return Story
@@ -142,10 +154,10 @@ def top_k_token_retriever(LLM, Topic, Story, T, k):
 
             model=LLM,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=1,
+            max_tokens=MAX_CONCURRENT_TOKENS,
             temperature=T,
             logprobs = True,
-            top_logprobs = min(k, 20)
+            top_logprobs = k
         )
 
         # Extract & log tokens (navigate JSON struct)
@@ -188,8 +200,7 @@ def token_pos_check(Y_topk, Story, Ci, bi):
 
 import chip.constants as constants
 from secrets import token_bytes
-from dataclasses import dataclass
-from hashlib import pbkdf2_hmac, shake_128
+from hashlib import shake_128
 from typing import List, Protocol
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -254,30 +265,16 @@ class LLMAuthenticatedEncryption:
             security_level = constants.SECURITY_LEVEL,
         )
 
-        # Call embedderLLM and generate the story
-        llmChoice = input("What LLM model would you like to use: ")
-        story = embedderLLM(llmChoice, topic, initial_story, temperature, top_k, characters, positions, 4, 64)
-
         return story #Step 12, return story (and eventually send to Bob)
     
 
     def _derive_keys(self, password: str) -> tuple[bytes, bytes]:
         """
-        PBKDF2(password, Salt, count, 64)
+        Derives two 32-byte keys from the password using SHAKE-128.
 
-        Split into:
-            dk1 = first 32 bytes
-            dk2 = last 32 bytes
+        Returns:
+            (dk1, dk2) — dk1 is used for AEAD encryption; dk2 seeds position generation.
         """
-
-        # derived = pbkdf2_hmac(
-        #     hash_name="shake128",
-        #     password=password.encode(),
-        #     salt=constants.SALT,
-        #     iterations=constants.PBKDF2_iterations,
-        #     dklen=64,
-        # )
-
         derived = shake_128(password.encode() + constants.SALT).digest(64)
 
 
@@ -286,9 +283,6 @@ class LLMAuthenticatedEncryption:
 
         return dk1, dk2
     
-    ''' 
-    # AEAD Encryption
-    '''
     def _aead_encrypt(
         self,
         key: bytes,
@@ -389,27 +383,22 @@ class LLMAuthenticatedDecryption:
         except KeyError:
             return None  # Story contains an unexpected character
 
-        # The encrypted blob produced by _aead_encrypt is: nonce (12 B) || ciphertext || tag (16 B)
-        # In hex: 24 chars nonce + 2n chars ciphertext + 32 chars tag
-        if len(hex_str) < 24 + 32:
+        # The encrypted blob produced by _aead_encrypt is:
+        #   nonce (NONCE_SIZE B) || ciphertext || tag (16 B)
+        # In hex: (NONCE_SIZE*2) chars nonce + variable ciphertext + 32 chars tag
+        nonce_hex_len = constants.NONCE_SIZE * 2
+        if len(hex_str) < nonce_hex_len + 32:
             return None  # Too short to be a valid ciphertext
 
-        nonce = bytes.fromhex(hex_str[:24])
+        nonce = bytes.fromhex(hex_str[:nonce_hex_len])
         # AESGCM.decrypt expects ciphertext || tag as a single buffer
-        ciphertext_with_tag = bytes.fromhex(hex_str[24:])
+        ciphertext_with_tag = bytes.fromhex(hex_str[nonce_hex_len:])
 
         # Line 13: AEAD_dec(dk1, nonce, AD, ciphertext || tag)
         return self._aead_decrypt(dk1, nonce, ciphertext_with_tag, constants.ASSOCIATED_DATA)
 
     def _derive_keys(self, password: str) -> tuple[bytes, bytes]:
-        """PBKDF2(password, Salt, count, 64) → (dk1, dk2)."""
-        # derived = pbkdf2_hmac(
-        #     hash_name="shake128",
-        #     password=password.encode(),
-        #     salt=constants.SALT,
-        #     iterations=constants.PBKDF2_iterations,
-        #     dklen=64,
-        # )
+        """Derives (dk1, dk2) from the password using SHAKE-128 — mirrors LLMAuthenticatedEncryption._derive_keys."""
         derived = shake_128(password.encode() + constants.SALT).digest(64)
         return derived[:32], derived[32:]
 

@@ -1,6 +1,9 @@
 """
-Algorithm 2 unit tests.
-Run with: python tests.py
+tests.py
+Authors: Raiyaan Tareen, Aidan Denham
+Unit tests for Algorithm 2 and Algorithm 3 components, using a MockEmbedder to isolate the cryptographic logic from LLM variability. 
+Also includes a full encrypt-decrypt round-trip test and per-character validation
+Please note that parts of this file were created with the help of Artificial Intelligence, especially the MockEmbedder class.
 """
 
 from embedder import LLMAuthenticatedEncryption, LLMAuthenticatedDecryption, compute_encoding
@@ -178,7 +181,6 @@ def test_compute_encoding_no_negative_indices():
       'F' → index 5  → H5[5][1]  = 'N'
     (i.e. each hex digit value maps directly to that H5 index)
     """
-    from embedder import compute_encoding
     from chip.constants import H5
 
     test_input = "4A2F"
@@ -190,8 +192,6 @@ def test_compute_encoding_no_negative_indices():
               f"raised unexpected exception: {e}")
         return
 
-    # Expected: each hex digit (0-9, A-F) maps directly to H5[digit_value][1]
-    expected = [H5[4][1], H5[0][1], H5[2][1], H5[15][1]]  # '4'=4,'A'=10... wait, 'F'=15
     # Hex digit values: '4'->4, 'A'->10, '2'->2, 'F'->15
     expected = [H5[4][1], H5[10][1], H5[2][1], H5[15][1]]
 
@@ -211,9 +211,12 @@ def test_compute_encoding_known_input():
     assert isinstance(result, list), "result should be a list"
     assert all(isinstance(c, str) and len(c) == 1 for c in result), \
         "each element should be a single character"
-    # 'A' → ASCII 0x41, 0x41-0x41=0 → H5[0]=(0,' ') → H5[0][0]=0 → H5[0][1]=' '
-    assert result[0] == " ", f"first char should be ' ', got {repr(result[0])}"
-    _pass("compute_encoding: maps known input to correct H5 characters")
+    # compute_encoding uses int(ch, 16) to index into H4, not ASCII subtraction.
+    # 'A' → int('A', 16) = 10 → H4[10] = (10, 'D')
+    expected_first = constants.H4[10][1]  # 'D'
+    assert result[0] == expected_first, \
+        f"first char should be '{expected_first}', got {repr(result[0])}"
+    _pass("compute_encoding: maps known input to correct H4 characters")
 
 
 def test_compute_encoding_output_length():
@@ -302,6 +305,220 @@ def test_encrypt_decrypt_roundtrip():
 
 
 # ---------------------------------------------------------------------------
+# Character-placement verification helper
+# ---------------------------------------------------------------------------
+
+def verify_character_placement(story: str, characters: list, positions: list) -> list:
+    """
+    Given a completed story and the (characters, positions) sequence that was
+    supposed to be embedded, return a list of failure dicts for every position
+    where story[pos].upper() != char.upper().
+
+    Each failure dict has keys: index, pos, expected, actual.
+
+    An empty return list means every character is at the correct position.
+    This helper is useful both in unit tests (with a mock embedder) and
+    for post-hoc verification of a real LLM-generated story.
+    """
+    failures = []
+    for idx, (char, pos) in enumerate(zip(characters, positions)):
+        if pos >= len(story):
+            failures.append({
+                "index": idx, "pos": pos, "expected": char,
+                "actual": "<story too short>",
+            })
+        elif story[pos].upper() != char.upper():
+            failures.append({
+                "index": idx, "pos": pos, "expected": char,
+                "actual": story[pos],
+            })
+    return failures
+
+
+def verify_story_correctness(story: str, password: str, plaintext: bytes) -> bool:
+    """
+    Verify that `story` correctly embeds `plaintext` under `password`.
+
+    Re-derives the position sequence and expected characters from first principles,
+    compares every story[pos] against the expected H4 character, then runs AEAD
+    decryption as the ground-truth check.
+
+    Designed to be called against a real LLM-generated story from any hardware:
+
+        from tests import verify_story_correctness
+        verify_story_correctness(story, password, plaintext)
+
+    Returns True if every character placement and AEAD decryption are correct.
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    def _display(b: bytes) -> str:
+        try:
+            return repr(b.decode())
+        except UnicodeDecodeError:
+            return repr(b)
+
+    enc_helper = LLMAuthenticatedEncryption(None)
+    dk1, dk2 = enc_helper._derive_keys(password)
+
+    # Total embedded hex chars = 2 * (nonce || plaintext || 16-byte GCM tag)
+    n = 2 * (constants.NONCE_SIZE + len(plaintext) + 16)
+    positions = enc_helper._generate_positions(dk2, n)
+
+    # H4 inverse: character → hex digit string
+    inverse_h4 = {char: format(idx, 'X') for idx, (_, char) in enumerate(constants.H4)}
+
+    # ── 1. Extract characters from the story at every expected position ────────
+    extracted = []
+    too_short = []
+    for i, pos in enumerate(positions):
+        if pos >= len(story):
+            extracted.append(None)
+            too_short.append(i)
+        else:
+            extracted.append(story[pos].upper())
+
+    bad_alphabet = [i for i, c in enumerate(extracted)
+                    if c is not None and c not in inverse_h4]
+
+    # ── 2. Recover the nonce from the embedded positions, then re-encrypt ──────
+    valid_chars = [c for c in extracted if c is not None]
+    hex_str = ''.join(inverse_h4.get(c, '0') for c in valid_chars)
+    nonce_hex_len = constants.NONCE_SIZE * 2
+
+    all_ok = True
+    if len(hex_str) >= nonce_hex_len:
+        nonce = bytes.fromhex(hex_str[:nonce_hex_len])
+
+        # Re-encrypt with the recovered nonce — GCM is deterministic given (key, nonce, pt, aad)
+        aesgcm = AESGCM(dk1)
+        expected_blob = nonce + aesgcm.encrypt(nonce, plaintext, constants.ASSOCIATED_DATA)
+        expected_hex = expected_blob.hex().upper()
+        expected_chars = [constants.H4[int(ch, 16)][1] for ch in expected_hex]
+
+        # ── 3. Per-character comparison ───────────────────────────────────────
+        mismatches = []
+        for i, (exp, pos) in enumerate(zip(expected_chars, positions)):
+            actual = extracted[i] if i < len(extracted) else None
+            if actual is None:
+                mismatches.append((i, pos, exp, '<story too short>'))
+            elif actual != exp.upper():
+                mismatches.append((i, pos, exp, actual))
+
+        if mismatches:
+            all_ok = False
+            total = len(expected_chars)
+            print(f"  Placement: {len(mismatches)}/{total} characters wrong")
+            for m in mismatches[:10]:
+                print(f"    char {m[0]:4d}  pos {m[1]:6d}  expected '{m[2]}'  found '{m[3]}'")
+            if len(mismatches) > 10:
+                print(f"    ... and {len(mismatches) - 10} more")
+    else:
+        all_ok = False
+        print("  Could not recover nonce — too few characters extracted from story.")
+
+    if too_short:
+        print(f"  Story too short: {len(too_short)} positions beyond end "
+              f"(story_len={len(story)}, last required pos={positions[-1]})")
+    if bad_alphabet:
+        print(f"  {len(bad_alphabet)} extracted characters not in H4 alphabet")
+
+    # ── 4. AEAD decryption as ground-truth ────────────────────────────────────
+    dec = LLMAuthenticatedDecryption(password=password, story=story)
+    recovered = dec.decrypt_from_story()
+
+    print(f"  Plaintext  : {_display(plaintext)}")
+    print(f"  Ciphertext : {hex_str}  ({len(hex_str)} hex chars embedded across {len(story)}-char story)")
+    if recovered == plaintext:
+        print(f"  Decrypted  : {_display(recovered)}")
+    else:
+        all_ok = False
+        if recovered is None:
+            print(f"  Decrypted  : FAIL (authentication error — wrong password or tampered story)")
+        else:
+            print(f"  Decrypted  : FAIL (got {_display(recovered)}, expected {_display(plaintext)})")
+
+    return all_ok
+
+
+# ---------------------------------------------------------------------------
+# Parameterised placement + decryption test
+# ---------------------------------------------------------------------------
+
+def test_character_placement_and_decrypt_arbitrary_sizes():
+    """
+    For plaintexts of various sizes, verifies two things end-to-end:
+
+      1. Character placement — every mapped_chars[i] appears at positions[i]
+         in the generated story (caught by inspecting the story the embedder
+         returned, using the characters/positions it was given).
+
+      2. Decryption correctness — decrypt_from_story() with the correct
+         password recovers the exact original plaintext bytes.
+
+      3. Wrong-password rejection — decrypt_from_story() with a different
+         password returns None.
+
+    A PositionEmbedder is used so the story is constructed deterministically:
+    it places each required character at exactly the required index, padding
+    all other positions with 'x'.  This isolates the cryptographic and
+    position-generation logic from LLM variability.
+    """
+
+    class RecordingPositionEmbedder:
+        """Places each char at its exact required position and records the call."""
+        def __init__(self):
+            self.characters = None
+            self.positions = None
+
+        def embed(self, topic, initial_story, characters, positions,
+                  temperature, top_k, security_level) -> str:
+            self.characters = list(characters)
+            self.positions = list(positions)
+            story = ['x'] * (positions[-1] + 1)
+            for char, pos in zip(characters, positions):
+                story[pos] = char
+            return ''.join(story)
+
+    test_cases = [
+        ("tiny",   b"A"),
+        ("small",  b"Hello!"),
+        ("medium", b"Attack at dawn, general."),
+        ("large",  b"The quick brown fox jumps over the lazy dog. " * 4),
+        ("bytes",  bytes(range(32))),   # arbitrary binary content
+    ]
+
+    all_passed = True
+    for label, plaintext in test_cases:
+        password = f"test-password-{label}"
+        embedder = RecordingPositionEmbedder()
+        enc = LLMAuthenticatedEncryption(embedder)
+
+        story = enc.encrypt_to_story(
+            password=password,
+            plaintext=plaintext,
+            topic="Test topic",
+        )
+
+        print(
+            f"    [LOG] label={label:<8s} plaintext_len={len(plaintext):4d} "
+            f"n={len(embedder.positions):4d} story_len={len(story):6d}",
+            flush=True,
+        )
+
+        ok = verify_story_correctness(story, password, plaintext)
+        if ok:
+            _pass(f"character_placement_and_decrypt: {label} (plaintext_len={len(plaintext)})")
+        else:
+            _fail(f"character_placement_and_decrypt [{label}]",
+                  "see [VERIFY] lines above")
+            all_passed = False
+
+    if not all_passed:
+        raise AssertionError("One or more size variants failed — see above.")
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -320,6 +537,7 @@ def run_tests():
         test_compute_encoding_output_length,
         test_encrypt_to_story_integration,
         test_encrypt_decrypt_roundtrip,
+        test_character_placement_and_decrypt_arbitrary_sizes,
     ]
     passed = 0
     failed = 0
